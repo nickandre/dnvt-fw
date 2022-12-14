@@ -1,0 +1,3 @@
+/Users/nandre/src/dnvt-switch/build/pioasm/CMakeFiles/pioasm.dir
+/Users/nandre/src/dnvt-switch/build/pioasm/CMakeFiles/edit_cache.dir
+/Users/nandre/src/dnvt-switch/build/pioasm/CMakeFiles/rebuild_cache.dir
