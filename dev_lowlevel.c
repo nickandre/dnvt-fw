@@ -573,7 +573,7 @@ void ep1_out_handler(uint8_t *buf, uint16_t len) {
 void ep2_in_handler(uint8_t *buf, uint16_t len) {
     printf("Sent %d bytes to host\n", len);
     // Get ready to rx again from host
-    //usb_start_transfer(usb_get_endpoint_configuration(EP1_OUT_ADDR), NULL, 64);
+    usb_start_transfer(usb_get_endpoint_configuration(EP1_OUT_ADDR), NULL, 64);
 }
 
 void ep3_out_handler(uint8_t *buf, uint16_t len) {
@@ -587,10 +587,7 @@ void ep4_in_handler(uint8_t *buf, uint16_t len) {
     usb_start_transfer(usb_get_endpoint_configuration(EP3_OUT_ADDR), NULL, 64);
 }
 
-/*
-int main(void) {
-    stdio_init_all();
-    printf("USB Device Low-Level hardware example\n");
+void usb_init() {
     usb_device_init();
 
     // Wait until configured
@@ -600,11 +597,5 @@ int main(void) {
 
     // Get ready to rx from host
     usb_start_transfer(usb_get_endpoint_configuration(EP1_OUT_ADDR), NULL, 64);
-
-    // Everything is interrupt driven so just loop here
-    while (1) {
-        tight_loop_contents();
-    }
-
-    return 0;
-}*/
+    usb_start_transfer(usb_get_endpoint_configuration(EP3_OUT_ADDR), NULL, 64);
+}
