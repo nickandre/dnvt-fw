@@ -4,6 +4,11 @@ This repo contains the code for the DNVT military phone switch.
 
 ## Release History
 
+### Version 0.31
+
+- Fixes bug in connection to "unreachable" terminal (v 0.30 didn't present a connection failed tone)
+- shuffled a few of the states on the USB state mapping to better clarify "traffic"
+
 ### Version 0.30
 
 Initial public release. Includes usb-enabled firmware and host application. New features:
