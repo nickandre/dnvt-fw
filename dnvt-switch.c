@@ -55,6 +55,9 @@ int main()
     init_dips();
     //usb_init();
 
+    printf("USB Device Low-Level hardware example\n");
+    usb_device_init();
+
     while(1) {
         current_time_32 = time_us_32();
         if (current_time_32 - last_display_update > 250 * 1000) {
