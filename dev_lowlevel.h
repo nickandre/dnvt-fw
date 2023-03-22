@@ -9,6 +9,8 @@
 
 #include "usb_common.h"
 
+void usb_init();
+
 // Struct in which we keep the endpoint configuration
 typedef void (*usb_ep_handler)(uint8_t *buf, uint16_t len);
 struct usb_endpoint_configuration {

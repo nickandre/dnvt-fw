@@ -7,10 +7,16 @@
 
 ssd1306_t disp;
 
+void display_fw_update() {
+    ssd1306_clear(&disp);
+    ssd1306_draw_string(&disp, 0, 0*LINE_SPACE, 1, "Firmware Update");
+    ssd1306_show(&disp);
+}
+
 void update_display(){
     char buf[30];
     ssd1306_clear(&disp);
-    ssd1306_draw_string(&disp, 0, 0*LINE_SPACE, 1, "DNVT Switch ver 0.1");
+    ssd1306_draw_string(&disp, 0, 0*LINE_SPACE, 1, "DNVT Switch ver 0.2");
     ssd1306_draw_string(&disp, 0, 1*LINE_SPACE, 1, "Ln  Status  Conn. To");
     
     for (int i = 0; i < NUM_PHONES; i++) {
@@ -71,7 +77,7 @@ void update_display(){
     ssd1306_draw_line(&disp, 11*CHAR_WIDTH, 2*LINE_SPACE, 11*CHAR_WIDTH, 6*LINE_SPACE);
     // u_int64_t cycle_ctr = used_cycles + unused_cycles;
     // u_int8_t load = ((u_int64_t)used_cycles) * 1000 / cycle_ctr;
-    sprintf(buf, "Load: %03d%%   USB: n/c", get_load());
+    sprintf(buf, "Load: %03d%%   USB: %d", get_load(), gpio_get(4));
     ssd1306_draw_string(&disp, 0, 56, 1, buf);
     ssd1306_show(&disp);
 }

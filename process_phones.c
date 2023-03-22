@@ -256,8 +256,6 @@ void phone_task() {
         rx_fifo_empty = pio_sm_is_rx_fifo_empty(phone->pio, phone->sm_rx);
         if (!phone->idle_data_cleared && phone->phone_state == idle && (current_time - phone->last_data_received_time > 1000000)) {
             printf("phone %d: idle for one second, clearing pio\n", i);
-            gpio_put(phone->activity_led_pin, 0);
-            gpio_put(phone->call_status_led_pin, 0);
             phone->idle_data_cleared = true;
             pio_sm_restart(phone->pio, phone->sm_rx);
         }
@@ -300,11 +298,6 @@ void phone_task() {
                 phone->idle_data_cleared = false;
             }
         }
-        if (phone->activity_counter > 128) {
-            gpio_put(phone->activity_led_pin, 1);
-        } else {
-            gpio_put(phone->activity_led_pin, 0);
-        }
         // we expect release during transition to idle
         if (match_codeword(rx_word, RELEASE) && phone->phone_state != transition_to_idle) {
             printf("phone %d release rx, transition to idle\n", i);
@@ -312,7 +305,6 @@ void phone_task() {
             if (connection->requested || connection->active) {
                 connection->requested = false;
                 connection->active = false;
-                gpio_put(phone->call_status_led_pin, 0);
                 connections[connected_phone].requested = false;
                 connections[connected_phone].active = false;
                 printf("phone %d clearing connected phone %d\n", i, connected_phone);
@@ -537,17 +529,10 @@ void phone_task() {
                     connection->active = true;
                     connections[connected_phone].active = true;
                     printf("phone %d: received ring trip, transition_to_plaintext\n", i);
-                    gpio_put(phone->call_status_led_pin, 1);
                 }
                 if (!connection->requested) {
                     printf("phone %d: other connetion dropped, ring dismiss flow\n", i);
                     phone->phone_state = ring_dismiss_send_cue;
-                    gpio_put(phone->call_status_led_pin, 0);
-                }
-                if (phone->activity_counter > 128) {
-                    gpio_put(phone->call_status_led_pin, 1);
-                } else {
-                    gpio_put(phone->call_status_led_pin, 0);
                 }
                 pio_sm_put_blocking(phone->pio, phone->sm_tx, NULL_AUDIO);
                 break;
@@ -583,7 +568,6 @@ void phone_task() {
             case plain_text:
                 if (!connection->active) {
                     phone->phone_state = cue_until_sieze;
-                    gpio_put(phone->call_status_led_pin, 0);
                     continue;
                 }
                 if (match_codeword(rx_word, DIGIT_C)) {
@@ -600,7 +584,6 @@ void phone_task() {
                     remote_connection->requested = false;
                     continue;
                 }
-                gpio_put(phone->call_status_led_pin, 1);
                 connection->rx_word = rx_word;
                 connection->has_data = true;
                 if (connections[connected_phone].has_data) {
@@ -664,10 +647,6 @@ void init_phones() {
             offset_rx = pio1_offset_rx;
             offset_tx = pio1_offset_tx;
         }
-        gpio_init(phones[i].activity_led_pin);
-        gpio_set_dir(phones[i].activity_led_pin, GPIO_OUT);
-        gpio_init(phones[i].call_status_led_pin);
-        gpio_set_dir(phones[i].call_status_led_pin, GPIO_OUT);
         // 16 cylces/symbol, 32 khz total, 125mhz base freq in khz
         differential_manchester_tx_program_init(phones[i].pio, phones[i].sm_tx, offset_tx, phones[i].pin_tx, 125000.f / (32 * 16));
         differential_manchester_rx_program_init(phones[i].pio, phones[i].sm_rx, offset_rx, phones[i].pin_rx, 125000.f / (32 * 16));
