@@ -62,6 +62,7 @@ target_link_libraries(dnvt-switch
         pico_multicore
         hardware_resets
         hardware_irq
+        pico_unique_id
         )
 
 pico_add_extra_outputs(dnvt-switch)
