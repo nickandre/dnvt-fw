@@ -76,10 +76,10 @@ static const struct usb_device_descriptor device_descriptor = {
         .bMaxPacketSize0 = 64,     // Max packet size for ep0
         .idVendor        = 0xcafe, // Your vendor id
         .idProduct       = 0x6942, // Your product ID
-        .bcdDevice       = 0,      // No device revision number
+        .bcdDevice       = 0x0031,      // No device revision number
         .iManufacturer   = 1,      // Manufacturer string index
         .iProduct        = 2,      // Product string index
-        .iSerialNumber = 0,        // No serial number
+        .iSerialNumber = 3,        // No serial number
         .bNumConfigurations = 1    // One configuration
 };
 
@@ -152,12 +152,16 @@ static const unsigned char lang_descriptor[] = {
 };
 
 static const unsigned char *descriptor_strings[] = {
-        (unsigned char *) "Nicks Knacks",    // Vendor
+        (unsigned char *) "Nick's Knacks",    // Vendor
         (unsigned char *) "DNVT Adapter" // Product
 };
 
 
-void usb_device_init();
+void usb_housekeeping();
+bool usb_active();
+extern volatile bool configured;
+
+extern volatile bool fw_update_usb_request;
 
 
 #endif

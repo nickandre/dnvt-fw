@@ -6,6 +6,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "pico/stdlib.h"
 #include "pico/util/queue.h"
@@ -17,6 +18,10 @@
 #include "recording.h"
 #include "rickroll.h"
 #include "load_calculator.h"
+#include "dev_lowlevel.h"
+
+#include "dnvt-switch.h"
+#include "usb_structures.h"
 
 
 const uint LED_PIN = PICO_DEFAULT_LED_PIN;
@@ -56,8 +61,6 @@ struct PHONE phones[] = {
         .pio = pio0,
         .sm_tx = 0,
         .sm_rx = 1,
-        .activity_led_pin = 0,
-        .call_status_led_pin = 1,
         .pin_tx = 17,
         .pin_rx = 16,
         .phone_state = idle
@@ -66,8 +69,6 @@ struct PHONE phones[] = {
         .pio = pio0,
         .sm_tx = 2,
         .sm_rx = 3,
-        .activity_led_pin = 2,
-        .call_status_led_pin = 3,
         .pin_tx = 19,
         .pin_rx = 18,
         .phone_state = idle
@@ -76,8 +77,6 @@ struct PHONE phones[] = {
         .pio = pio1,
         .sm_tx = 0,
         .sm_rx = 1,
-        .activity_led_pin = 4,
-        .call_status_led_pin = 5,
         .pin_tx = 21,
         .pin_rx = 20,
         .phone_state = idle
@@ -86,8 +85,6 @@ struct PHONE phones[] = {
         .pio = pio1,
         .sm_tx = 2,
         .sm_rx = 3,
-        .activity_led_pin = 6,
-        .call_status_led_pin = 7,
         .pin_tx = 27,
         .pin_rx = 26,
         .phone_state = idle
@@ -96,32 +93,24 @@ struct PHONE phones[] = {
 
 struct CONNECTION connections[] = {
     {    
-        .rx_word = 0,
-        .has_data = false,
         .active = false,
         .requested = false,
-        .associated_device = 255
+        .associated_device = NOT_CONNECTED
     },
-    {    
-        .rx_word = 0,
-        .has_data = false,
+    {
         .active = false,
         .requested = false,
-        .associated_device = 255
+        .associated_device = NOT_CONNECTED
     },
-    {    
-        .rx_word = 0,
-        .has_data = false,
+    {
         .active = false,
         .requested = false,
-        .associated_device = 255
+        .associated_device = NOT_CONNECTED
     },
-    {    
-        .rx_word = 0,
-        .has_data = false,
+    {
         .active = false,
         .requested = false,
-        .associated_device = 255
+        .associated_device = NOT_CONNECTED
     }
 };
 
@@ -226,6 +215,7 @@ void serial_task() {
 
 void phone_task() {
     char digit;
+    u_int32_t null_audio = NULL_AUDIO;
     if (used_cycles > 0xFFF || unused_cycles > 0xFFF) {
         used_cycles >>= 8;
         unused_cycles >>= 8;
@@ -239,19 +229,29 @@ void phone_task() {
         struct CONNECTION *remote_connection = connections + connected_phone;
 
         // if we're in idle but a call is requested, move to ring
-        if  (phone->phone_state == idle && connection->requested) {
+        if  ((phone->phone_state == idle || phone->phone_state == unreachable)
+            && connection->requested) {
             printf("phone %d received request, push ring command\n", i);
             phone->phone_state = requesting_ring;
             // initial ring requires pushing command without rx until ring ack received
             phone->pushing_command = true;
             phone->attempted_contact = current_time;
         }
-        /*
-        if (phone->phone_state == ringing && !connection->requested) {
-            printf("phone %d ring cancel begin, push cue\n", i);
-            phone->phone_state = ring_dismiss_send_cue;
+        // this routine supervises phone lines to ensure they're connected
+        if (get_dip_value(DIP_DISABLE_SUPERVISORY) == 1
+            && phone->phone_state == idle
+            && (phone->last_data_received_time == 0 ||
+                current_time - phone->last_data_received_time > 600*1000*1000)) { //10 min in us
+            phone->phone_state = line_check;
             phone->pushing_command = true;
-        }*/
+            phone->attempted_contact = current_time;
+            printf("phone %d: supervisory check\n", i);
+        }
+        if (phone->phone_state == line_check &&
+            current_time - phone->attempted_contact > 50*1000) {
+            phone->phone_state = unreachable;
+            printf("phone %d: unreachable\n", i);
+        }
         bool tx_fifo_full = pio_sm_is_tx_fifo_full(phone->pio, phone->sm_tx),
         rx_fifo_empty = pio_sm_is_rx_fifo_empty(phone->pio, phone->sm_rx);
         if (!phone->idle_data_cleared && phone->phone_state == idle && (current_time - phone->last_data_received_time > 1000000)) {
@@ -305,9 +305,11 @@ void phone_task() {
             if (connection->requested || connection->active) {
                 connection->requested = false;
                 connection->active = false;
-                connections[connected_phone].requested = false;
-                connections[connected_phone].active = false;
-                printf("phone %d clearing connected phone %d\n", i, connected_phone);
+                if (!usb_active()) {
+                    connections[connected_phone].requested = false;
+                    connections[connected_phone].active = false;
+                    printf("phone %d clearing connected phone %d\n", i, connected_phone);
+                }
                 /*
                 printf(" connection0 req %d, connection1 req %d, ", connections[0].requested, connections[1].requested);
                 printf("connected phone %d []requested %d active %d\n", connected_phone, connections[connected_phone].requested, connections[connected_phone].active);
@@ -325,12 +327,33 @@ void phone_task() {
                     printf("phone %d transition to dial, matched %02x with %08x\n", i, SEIZE, rx_word);
                 }
                 break;
+            case line_check:
+            case unreachable:
+                if (match_codeword(rx_word, CUE_RELEASE_ACK)) {
+                    phone->phone_state = ring_dismiss_send_dial;
+                    printf("phone %d unreachable. response received, send cue to send dial\n", i);
+                    phone->pushing_command = false;
+                }
+                pio_sm_put_blocking(phone->pio, phone->sm_tx, create_codeword_word(CUE));
+                break;
             case transition_to_dial:
                 if (match_codeword(rx_word, INTERDIGIT)) {
-                    phone->phone_state = receiving_dial;
-                    printf("phone %d entering dial mode\n", i);
+                    if (usb_active()) {
+                        phone->phone_state = usb_dial;
+                        printf("phone %d entering usb dial mode\n", i);
+                    } else {
+                        u_int8_t dip_value = get_dip_value(DIP_DISABLE_LINE_SIMULATOR);
+                        printf("phone %d sent interdigit, dip value %d", i, dip_value);
+                        if (dip_value != 1 && !usb_active()) {
+                            phone->phone_state = connection_failure;
+                        } else {
+                            phone->phone_state = receiving_dial;
+                            printf("phone %d entering dial mode\n", i);
+                        }
+                    }
                     phone->digit_count = 0;
                     phone->current_digit = ' ';
+                    phone->last_transmitted_digit = 0;
                 }
                 pio_sm_put_blocking(phone->pio, phone->sm_tx, create_codeword_word(DIAL));
                 break;
@@ -381,11 +404,13 @@ void phone_task() {
                         phone->receiving_digit = true;
                     }
                 }
-                connection->rx_word = NULL_AUDIO;
-                connection->has_data = true;
-                if (connections[connected_phone].has_data) {
-                    pio_sm_put_blocking(phone->pio, phone->sm_tx, connections[connected_phone].rx_word);
-                    connections[connected_phone].has_data = false;
+                if (!queue_is_full(&connection->rx_queue)) {
+                    queue_try_add(&connection->rx_queue, &null_audio);
+                }
+                if (!queue_is_empty(&connections[connected_phone].rx_queue)) {
+                    u_int32_t data;
+                    queue_remove_blocking(&connections[connected_phone].rx_queue, &data);
+                    pio_sm_put_blocking(phone->pio, phone->sm_tx, data);
                 }
                 break;
             case cue_until_sieze:
@@ -410,6 +435,9 @@ void phone_task() {
                 transmitted_test_codewords++;
                 break;*/
             case receiving_dial:
+                if (get_dip_value(DIP_DISABLE_LINE_SIMULATOR) != 1 && !usb_active()) {
+                    phone->phone_state = connection_failure;
+                }
                 if (phone->current_digit == 'R' && phone->receiving_digit == false) {
                     printf("phone %d go to rickroll\n", i);
                     phone->phone_state = rickroll;
@@ -417,7 +445,7 @@ void phone_task() {
                     phone->current_digit = ' ';
                     continue;
                 }
-                if (phone->current_digit == 'C' && phone->receiving_digit == false) {
+                if (phone->digit_count > 0) {
                     u_int8_t target_device;
                     if (phone->digits[0] == '1'){
                         target_device = 0;
@@ -435,7 +463,9 @@ void phone_task() {
                         target_device = 255;
                     }
                     phone->current_digit = ' ';
-                    if (target_device != 255) {
+                    if (target_device == i) {
+                        phone->phone_state = connection_failure;
+                    } else if (target_device != 255) {
                         // phone number 1 to device 0
                         connection->associated_device = target_device;
                         connection->requested = true;
@@ -464,6 +494,31 @@ void phone_task() {
                     phone->receiving_digit = true;
                 }
                 pio_sm_put_blocking(phone->pio, phone->sm_tx, 0xffeb14aa);
+                break;
+            case usb_dial:
+                if (connection->active) {
+                    phone->phone_state = usb_traffic;
+                }
+                if (phone->receiving_digit) {
+                    if (match_codeword(rx_word, INTERDIGIT)) {
+                        printf("%c", phone->current_digit);
+                        phone->digits[phone->digit_count] = phone->current_digit;
+                        phone->receiving_digit = false;
+                        phone->digit_count++;
+                    }
+                }
+                digit = determine_digit(rx_word);
+                if (digit != ' ') {
+                    phone->current_digit = digit;
+                    phone->receiving_digit = true;
+                }
+                if (!queue_is_empty(&connection->tx_queue)){
+                    uint32_t data;
+                    queue_remove_blocking(&connection->tx_queue, &data);
+                    pio_sm_put_blocking(phone->pio, phone->sm_tx, data);
+                } else {
+                    pio_sm_put_blocking(phone->pio, phone->sm_tx, NULL_AUDIO);
+                }
                 break;
             case not_in_service_recording:
                 if (phone->recording_index > 5122) {
@@ -516,10 +571,13 @@ void phone_task() {
                     phone->pushing_command = false;
                 }
                 // we loitered here for half second without ack, assume line dead
-                if (current_time - phone->attempted_contact > 5000000) {
+                if (current_time - phone->attempted_contact > 250000) {
                     connection->requested = false;
                     connections[connected_phone].requested = false;
-                    phone->phone_state = idle;
+                    // todo: conn failed state
+                    phone->phone_state = unreachable;
+                    phone->pushing_command = true;
+                    break;
                 }
                 pio_sm_put_blocking(phone->pio, phone->sm_tx, create_codeword_word(RING_VOICE));
                 break;
@@ -546,8 +604,8 @@ void phone_task() {
                 break;
             case acknowledge_lock_in:
                 if (phone->sent_codewords > 50) {
-                    phone->phone_state = plain_text;
-                    printf("transition to plaintext\n");
+                    phone->phone_state = usb_active() ? usb_traffic : plain_text;
+                    printf("phone %d transition to plaintext\n", i);
                 } else {
                     phone->sent_codewords++;
                 }
@@ -571,24 +629,40 @@ void phone_task() {
                     continue;
                 }
                 if (match_codeword(rx_word, DIGIT_C)) {
-                    printf("phone %d matched C during plaintext, go to cue\n", i);
-                    phone->phone_state = cue_transition_to_traffic_dial;
-                    continue;
+                    if (phone->received_codeword_counter > 5) {
+                        printf("phone %d matched C during plaintext, go to cue\n", i);
+                        phone->phone_state = cue_transition_to_traffic_dial;
+                        continue;
+                    } else {
+                        phone->received_codeword_counter++;
+                    }
+                } else {
+                    phone->received_codeword_counter = 0;
                 }
-                if (match_codeword(rx_word, DIGIT_R)) {
-                    printf("phone %d matched R during plaintext, go to regular dial\n", i);
-                    phone->phone_state = cue_transition_to_dial;
-                    connection->active = false;
-                    connection->requested = false;
-                    remote_connection->active = false;
-                    remote_connection->requested = false;
-                    continue;
+                queue_try_add(&connection->rx_queue, &rx_word);
+                if (!queue_is_empty(&connections[connected_phone].rx_queue)) {
+                    u_int32_t data;
+                    queue_remove_blocking(&connections[connected_phone].rx_queue, &data);
+                    pio_sm_put_blocking(phone->pio, phone->sm_tx, data);
                 }
-                connection->rx_word = rx_word;
-                connection->has_data = true;
-                if (connections[connected_phone].has_data) {
-                    pio_sm_put_blocking(phone->pio, phone->sm_tx, connections[connected_phone].rx_word);
-                    connections[connected_phone].has_data = false;
+                break;
+            case usb_traffic:
+                if (match_codeword(rx_word, DIGIT_C)) {
+                    if (phone->received_codeword_counter > 5) {
+                        printf("phone %d matched C during plaintext, go to cue\n", i);
+                        phone->phone_state = cue_transition_to_traffic_dial;
+                        continue;
+                    } else {
+                        phone->received_codeword_counter++;
+                    }
+                } else {
+                    phone->received_codeword_counter = 0;
+                }
+                queue_try_add(&connection->rx_queue, &rx_word);
+                if (!queue_is_empty(&connection->tx_queue)) {
+                    u_int32_t data;
+                    queue_remove_blocking(&connection->tx_queue, &data);
+                    pio_sm_put_blocking(phone->pio, phone->sm_tx, data);
                 }
                 break;
             case ring_dismiss_send_cue:
@@ -639,6 +713,9 @@ void init_phones() {
     printf("Receive program loaded at %d\n", pio0_offset_rx);
     
     for (int i = 0; i < NUMBER_OF_PHONES; i++) {
+        queue_init(&connections[i].rx_queue, sizeof(u_int32_t), 8);
+        queue_init(&connections[i].tx_queue, sizeof(u_int32_t), 8);
+        phones[i].attempted_contact = 0;
         uint offset_tx, offset_rx;
         if (phones[i].pio == pio0) {
             offset_rx = pio0_offset_rx;
@@ -654,4 +731,118 @@ void init_phones() {
 
     //uint32_t* recording = malloc(5000 * sizeof(uint32_t));
 
+}
+
+uint8_t map_phone_state(struct PHONE *p) {
+    switch (p->phone_state) {
+    case idle:
+        return phone_idle;
+    
+    case off_hook:
+    case transition_to_dial:
+    case transition_to_idle:
+    case ring_dismiss_send_cue:
+    case ring_dismiss_send_dial:
+    case send_release_ack:
+    case requesting_ring:
+    case acknowledge_lock_in:
+    case transition_to_plaintext:
+    case cue_until_sieze:
+    case cue_transition_to_dial:
+    case connection_failure:
+    case plain_text:
+    case awaiting_remote_ring:
+    case not_in_service_recording:
+    case rickroll:
+        return phone_transitioning;
+    case receiving_dial:
+    case usb_dial:
+        return phone_dial;
+    case transition_to_traffic_dial:
+    case traffic_dial:
+    case cue_transition_to_traffic_dial:
+    case usb_traffic:
+        return phone_traffic; //"active"
+    case ringing:
+        return phone_ring;
+    case ringing_remote:
+        return phone_awaiting_remote_ring; //probably not needed
+    case unreachable:
+        return phone_unreachable;
+    //TODO: ring fail?
+    }
+}
+
+void handle_device_packet(uint8_t buf[64]) {
+    DEVICE_PACKET p;
+    memcpy(&p, buf, sizeof(p));
+    //printf("phone cmds: ");
+    for (int i = 0; i < 4; i++) {
+        struct PHONE *phone = phones + i;
+        //printf("%d ", p.phone_commands[i]);
+        uint8_t data_length = (p.data_lengths >> i*2) & 0x3;
+        if (data_length > 0) {
+            for (int j = 0; j < data_length; j++) {
+                queue_try_add(&connections[i].tx_queue, p.data[i] + j);
+            }
+        }
+        uint8_t cmd = p.phone_commands[i];
+        if (cmd) {
+            if (cmd == 0x1) {
+                phone->phone_state = requesting_ring;
+                phone->pushing_command = true;
+                phone->attempted_contact = time_us_64();
+                connections[i].requested = true;
+                printf("USB: requesting ring on %d\n", i);
+            } else if (cmd == 0x2) {
+                printf("USB: traffic req on %d\n", i);
+                phone->phone_state = transition_to_plaintext;
+            } else if (cmd == 0x3) {
+                printf("USB: back to dial req on %d\n", i);
+                phone->phone_state = cue_transition_to_dial;
+            } else if (cmd == 0x4) {
+                phone->phone_state = ring_dismiss_send_cue;
+                printf("USB: dismissing ring on %d\n", i);
+            }
+        }
+    }
+    //printf("\n");
+}
+
+void populate_host_packet(HOST_PACKET *p) {
+    p->phone_states = 0;
+    p->data_lengths = 0;
+    for (int i = 0; i < NUMBER_OF_PHONES; i ++) {
+        struct PHONE *ph = phones + i;
+        struct CONNECTION *c = connections + i;
+        // phone state
+        p->phone_states |= (map_phone_state(ph) << i*4);
+        // add data
+        uint8_t level = queue_get_level(&c->rx_queue);
+        if (level > 0) {
+            if (level > 3) {
+                level = 3;
+            }
+            // add the level (0-3 words per line)
+            p->data_lengths |= level << i*2;
+            for (int j = 0; j < level; j++) {
+                uint32_t data;
+                queue_remove_blocking(&c->rx_queue, &data);
+                p->data[i][j] = data;
+            }
+        }
+        if (ph->digit_count > ph->last_transmitted_digit) {
+            p->phone_digits[i] = ph->digits[ph->last_transmitted_digit++];
+        } else {
+            p->phone_digits[i] = 0;
+        }
+    }
+    return;
+}
+
+uint8_t create_host_packet(uint8_t *buf) {
+    HOST_PACKET p;
+    populate_host_packet(&p);
+    memcpy(buf, &p, sizeof(p));
+    return sizeof(p);
 }
