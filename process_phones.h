@@ -2,6 +2,7 @@
 
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
+#include "pico/util/queue.h"
 
 #define GAIN_STEP 0xB5// 0.71 = 0x0.B5C2, do 8 bit shift
 #define GAIN_DECAY 0xFCD1 // 0.9875778 = 0x0.FCD1, 16 bit shift
@@ -74,7 +75,10 @@ enum PHONE_STATE {
     cue_transition_to_dial = 21,
     not_in_service_recording = 22,
     rickroll = 23,
-    forward_dial_to_computer = 24
+    usb_dial = 24,
+    usb_traffic = 25,
+    unreachable,
+    line_check
 };
 
 struct PHONE {
@@ -84,15 +88,14 @@ struct PHONE {
     u_int8_t sm_rx;
     u_int8_t pin_tx;
     u_int8_t pin_rx;
-    uint activity_led_pin;
-    uint call_status_led_pin;
     // current state
-    enum PHONE_STATE phone_state;
+    volatile enum PHONE_STATE phone_state;
     // are we pushing a command without rx?
     bool pushing_command;
     // list of received digits, current digit
     char digits[20];
     char current_digit;
+    uint8_t last_transmitted_digit;
     u_int8_t digit_count;
     bool receiving_digit;
     // if sending fixed qty of codewords, count that here
@@ -106,12 +109,15 @@ struct PHONE {
     // have we cleared the sm?
     bool idle_data_cleared;
     u_int32_t recording_index;
+    u_int8_t received_codeword_counter;
 };
 
+#define CONNECTED_TO_USB 0xFE
+#define NOT_CONNECTED 0xFF
 
 struct CONNECTION {
-    u_int32_t rx_word;
-    bool has_data;
+    queue_t rx_queue;
+    queue_t tx_queue;
     bool active;
     bool requested;
     u_int8_t associated_device;
@@ -126,8 +132,11 @@ LED layout
 extern struct PHONE phones[];
 
 extern struct CONNECTION connections[];
-#endif
 
 void init_phones();
 
 void phone_task();
+
+uint8_t create_host_packet(uint8_t*);
+void handle_device_packet(uint8_t*);
+#endif
