@@ -3,3 +3,4 @@ CMakeCache.txt
 generated
 elf2uf2
 pico-sdk
+host/main

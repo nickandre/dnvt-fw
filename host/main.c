@@ -85,7 +85,7 @@ FILE *logfile;
 
 PHONE phones[MAX_PHONES];
 struct libusb_device_handle *dnvt_sw[MAX_SWITCHES];
-char dev_serials[MAX_SWITCHES][20];
+unsigned char dev_serials[MAX_SWITCHES][20];
 int open_devices = 0;
 
 bool thread_run = true;
@@ -446,8 +446,6 @@ void firmware_update(struct libusb_device_handle *dh) {
 
 void usb_test(struct libusb_device_handle *dh) {
     unsigned char buf[64];
-    int transferred_size;
-    printf("transferred %i bytes\n", transferred_size);
     printf("buffer: ");
     for (int i = 0; i < 64; i++) {
         printf("%02X:", buf[i]);
@@ -496,9 +494,8 @@ int main() {
         assert(rc == 0);
         printf("Vendor:Device = %04x:%04x v %02x.%02x\n", desc.idVendor, desc.idProduct, desc.bcdDevice >> 8, desc.bcdDevice);     
         if (desc.idVendor == 0xCAFE) {
-            unsigned char serial_number[20];
             libusb_open(device, &dnvt_sw[open_devices]);
-            int l = libusb_get_string_descriptor_ascii(dnvt_sw[open_devices], desc.iSerialNumber, dev_serials[open_devices], 20);
+            libusb_get_string_descriptor_ascii(dnvt_sw[open_devices], desc.iSerialNumber, dev_serials[open_devices], 20);
             printf("Serial: %s\n", dev_serials[open_devices]);
             open_devices++;
         }
