@@ -77,6 +77,9 @@ enum PHONE_STATE {
     rickroll = 23,
     usb_dial = 24,
     usb_traffic = 25,
+    cue_transition_to_usb_traffic_dial = 26,
+    transition_to_usb_traffic_dial = 27,
+    usb_traffic_dial = 28,
     unreachable,
     line_check
 };

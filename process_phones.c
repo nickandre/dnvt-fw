@@ -16,6 +16,7 @@
 
 #include "process_phones.h"
 #include "recording.h"
+
 #include "rickroll.h"
 #include "load_calculator.h"
 #include "dev_lowlevel.h"
@@ -114,6 +115,20 @@ struct CONNECTION connections[] = {
     }
 };
 
+
+// Returns true if the word contains ANY 3 repeating bytes at any bit offset
+// (i.e., it's a codeword or null audio, not voice data)
+bool is_codeword_pattern(u_int32_t frame) {
+    for (int i = 0; i < 8; i++) {
+        u_int8_t b0 = (frame >> i) & 0xFF;
+        u_int8_t b1 = (frame >> (i + 8)) & 0xFF;
+        u_int8_t b2 = (frame >> (i + 16)) & 0xFF;
+        if (b0 == b1 && b1 == b2) {
+            return true;
+        }
+    }
+    return false;
+}
 
 bool match_codeword(u_int32_t frame, u_int8_t codeword) {
     // rx state machine is fucked
@@ -286,9 +301,29 @@ void phone_task() {
         } else {
             // normal mode, expect back and fourth
             if (rx_fifo_empty) {
-                // no data available for this phone, skip it
-                unused_cycles++;
-                continue;
+                // In usb_traffic: keep TX flowing even without RX
+                // (phone may not be sending until PTT, but we still need to push SIP audio)
+                if (phone->phone_state == usb_traffic) {
+                    // In USB traffic without RX: keep TX alive for SIP audio
+                    // Don't set rx_word — skip RX processing but still do TX
+                    load_counter_start_work();
+                    phone->last_data_received_time = current_time;
+                    // Only do TX, skip the state machine
+                    if (!pio_sm_is_tx_fifo_full(phone->pio, phone->sm_tx)) {
+                        if (!queue_is_empty(&connection->tx_queue)) {
+                            u_int32_t data;
+                            queue_remove_blocking(&connection->tx_queue, &data);
+                            pio_sm_put_blocking(phone->pio, phone->sm_tx, data);
+                        } else {
+                            pio_sm_put_blocking(phone->pio, phone->sm_tx, NULL_AUDIO);
+                        }
+                    }
+                    continue;  // skip the state machine entirely
+                } else {
+                    // no data available for this phone, skip it
+                    unused_cycles++;
+                    continue;
+                }
             } else {
                 used_cycles++;
                 load_counter_start_work();
@@ -386,7 +421,10 @@ void phone_task() {
                     phone->current_digit = ' ';
                     continue;
                 }
-                if (phone->current_digit == 'C' && phone->receiving_digit == false) {
+                // C marks end of dialing ONLY if it was dialed AS a digit
+                // during this session (not the initial C that entered traffic_dial)
+                if (phone->current_digit == 'C' && phone->receiving_digit == false
+                    && phone->digit_count > 0) {
                     phone->phone_state = transition_to_plaintext;
                     printf(" - phone %d dialing complete, transition to ring\n", i);
                     phone->current_digit = ' ';
@@ -605,6 +643,7 @@ void phone_task() {
             case acknowledge_lock_in:
                 if (phone->sent_codewords > 50) {
                     phone->phone_state = usb_active() ? usb_traffic : plain_text;
+                    phone->pushing_command = false;
                     printf("phone %d transition to plaintext\n", i);
                 } else {
                     phone->sent_codewords++;
@@ -632,6 +671,9 @@ void phone_task() {
                     if (phone->received_codeword_counter > 5) {
                         printf("phone %d matched C during plaintext, go to cue\n", i);
                         phone->phone_state = cue_transition_to_traffic_dial;
+                        phone->current_digit = ' ';
+                        phone->digit_count = 0;
+                        phone->receiving_digit = false;
                         continue;
                     } else {
                         phone->received_codeword_counter++;
@@ -647,22 +689,89 @@ void phone_task() {
                 }
                 break;
             case usb_traffic:
-                if (match_codeword(rx_word, DIGIT_C)) {
-                    if (phone->received_codeword_counter > 5) {
-                        printf("phone %d matched C during plaintext, go to cue\n", i);
-                        phone->phone_state = cue_transition_to_traffic_dial;
-                        continue;
-                    } else {
+                // Detect digit codewords during traffic (R, 0, C work — phone sends them)
+                digit = determine_digit(rx_word);
+                if (digit != ' ') {
+                    if (digit == phone->current_digit) {
                         phone->received_codeword_counter++;
+                    } else {
+                        phone->current_digit = digit;
+                        phone->received_codeword_counter = 1;
+                    }
+                    // After 6 consecutive matches, report the digit
+                    if (phone->received_codeword_counter == 6) {
+                        phone->digits[phone->digit_count] = digit;
+                        phone->digit_count++;
+                        phone->receiving_digit = true;
                     }
                 } else {
+                    if (phone->receiving_digit) {
+                        phone->receiving_digit = false;
+                        phone->current_digit = ' ';
+                    }
                     phone->received_codeword_counter = 0;
                 }
                 queue_try_add(&connection->rx_queue, &rx_word);
+                if (!pio_sm_is_tx_fifo_full(phone->pio, phone->sm_tx)) {
+                    if (!queue_is_empty(&connection->tx_queue)) {
+                        u_int32_t data;
+                        queue_remove_blocking(&connection->tx_queue, &data);
+                        pio_sm_put_blocking(phone->pio, phone->sm_tx, data);
+                    } else {
+                        // Keep PIO TX running even when no host audio available
+                        pio_sm_put_blocking(phone->pio, phone->sm_tx, NULL_AUDIO);
+                    }
+                }
+                break;
+            case cue_transition_to_usb_traffic_dial:
+                // Send CUE, wait for SEIZE from phone
+                if (match_codeword(rx_word, SEIZE)) {
+                    phone->phone_state = transition_to_usb_traffic_dial;
+                    printf("phone %d usb traffic dial: got seize\n", i);
+                }
+                pio_sm_put_blocking(phone->pio, phone->sm_tx, create_codeword_word(CUE));
+                break;
+            case transition_to_usb_traffic_dial:
+                // Send DIAL, wait for INTERDIGIT from phone
+                if (match_codeword(rx_word, INTERDIGIT)) {
+                    phone->phone_state = usb_traffic_dial;
+                    phone->receiving_digit = false;
+                    phone->current_digit = ' ';
+                    phone->received_codeword_counter = 0;
+                    printf("phone %d usb traffic dial: ready for digits\n", i);
+                }
+                pio_sm_put_blocking(phone->pio, phone->sm_tx, create_codeword_word(DIAL));
+                break;
+            case usb_traffic_dial:
+                if (phone->receiving_digit) {
+                    if (match_codeword(rx_word, INTERDIGIT)) {
+                        phone->digits[phone->digit_count] = phone->current_digit;
+                        phone->digit_count++;
+                        phone->receiving_digit = false;
+                        phone->received_codeword_counter = 0;
+                    }
+                } else {
+                    digit = determine_digit(rx_word);
+                    if (digit != ' ') {
+                        phone->current_digit = digit;
+                        phone->receiving_digit = true;
+                        phone->received_codeword_counter = 0;
+                    } else if (match_codeword(rx_word, INTERDIGIT)) {
+                        phone->received_codeword_counter = 0;
+                    } else {
+                        phone->received_codeword_counter++;
+                        if (phone->received_codeword_counter > 200) {
+                            phone->phone_state = usb_traffic;
+                            phone->received_codeword_counter = 0;
+                        }
+                    }
+                }
                 if (!queue_is_empty(&connection->tx_queue)) {
                     u_int32_t data;
                     queue_remove_blocking(&connection->tx_queue, &data);
                     pio_sm_put_blocking(phone->pio, phone->sm_tx, data);
+                } else {
+                    pio_sm_put_blocking(phone->pio, phone->sm_tx, NULL_AUDIO);
                 }
                 break;
             case ring_dismiss_send_cue:
@@ -713,8 +822,8 @@ void init_phones() {
     printf("Receive program loaded at %d\n", pio0_offset_rx);
     
     for (int i = 0; i < NUMBER_OF_PHONES; i++) {
-        queue_init(&connections[i].rx_queue, sizeof(u_int32_t), 8);
-        queue_init(&connections[i].tx_queue, sizeof(u_int32_t), 8);
+        queue_init(&connections[i].rx_queue, sizeof(u_int32_t), 64);
+        queue_init(&connections[i].tx_queue, sizeof(u_int32_t), 64);
         phones[i].attempted_contact = 0;
         uint offset_tx, offset_rx;
         if (phones[i].pio == pio0) {
@@ -762,6 +871,9 @@ uint8_t map_phone_state(struct PHONE *p) {
     case traffic_dial:
     case cue_transition_to_traffic_dial:
     case usb_traffic:
+    case cue_transition_to_usb_traffic_dial:
+    case transition_to_usb_traffic_dial:
+    case usb_traffic_dial:
         return phone_traffic; //"active"
     case ringing:
         return phone_ring;
@@ -797,6 +909,7 @@ void handle_device_packet(uint8_t buf[64]) {
             } else if (cmd == 0x2) {
                 printf("USB: traffic req on %d\n", i);
                 phone->phone_state = transition_to_plaintext;
+                phone->pushing_command = true;
             } else if (cmd == 0x3) {
                 printf("USB: back to dial req on %d\n", i);
                 phone->phone_state = cue_transition_to_dial;
@@ -812,6 +925,11 @@ void handle_device_packet(uint8_t buf[64]) {
 void populate_host_packet(HOST_PACKET *p) {
     p->phone_states = 0;
     p->data_lengths = 0;
+    // Debug: report tx_queue level and internal state for phone 0
+    p->reserved = (uint8_t)(
+        (queue_get_level(&connections[0].tx_queue) << 4) |  // high nibble: queue level
+        (phones[0].phone_state & 0x0F)                       // low nibble: state (truncated)
+    );
     for (int i = 0; i < NUMBER_OF_PHONES; i ++) {
         struct PHONE *ph = phones + i;
         struct CONNECTION *c = connections + i;
